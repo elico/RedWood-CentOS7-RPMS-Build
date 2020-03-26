@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+
+#!/bin/bash -exu
+set -x
+set -e
+
+if [[ "${DEBUG_MODE}" -eq "1" ]];then
+	set -x
+fi
+
+
+if [[ -z "${RELEASE_NUMBER}" ]];then
+	echo "RELEASE_NUMBER must be present"
+	exit 1
+fi
+
+if [[ -z "${VERSION_NUMBER}" ]];then
+	echo "VERSION_NUMBER must be present"
+	exit 1
+fi
+
+export BUILDZONE=${HOME}
+export DESTDIR="${BUILDZONE}/fakeroot"
+export PACKAGES_DEST="/srv/packages"
+
+export ARCH=$(uname -m| sed 's/x86_//;s/i[3-6]86/32/')
+export CPU_COUNT=$(grep processor /proc/cpuinfo | wc -l)
+export USER=$(whoami)
+
+export SPEC_FILE="redwood.spec"
+
+## For RPM Based OS such as: CentOS\RHEL\AWS\SUSE\Oracle
+
+cd ${BUILDZONE}
+sudo mkdir -p "${PACKAGES_DEST}"
+sudo chmod 777 "${PACKAGES_DEST}"
+sudo chown ${USER}: "${PACKAGES_DEST}"
+
+mkdir -p ${BUILDZONE}/{BUILD,RPMS,SRPMS,SPECS,SOURCES}
+
+cp -v "/srv/SOURCES/"* "${BUILDZONE}/SOURCES/"
+cp -v "/srv/SPECS/"* "${BUILDZONE}/SPECS/"
+cp -v "/redwood" "${BUILDZONE}/SOURCES/redwood"
+
+rpmbuild --define '_topdir '${BUILDZONE} --define "_smp_mflags -j${CPU_COUNT}" -ba -vv "${BUILDZONE}/SPECS/${SPEC_FILE}"
+
+cp -v "${BUILDZONE}/RPMS/"*"/"* "${PACKAGES_DEST}/"
+cp -v "${BUILDZONE}/SRPMS/"* "${PACKAGES_DEST}/"
+
+set +e
+set +x

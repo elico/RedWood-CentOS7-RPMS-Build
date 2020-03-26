@@ -1,0 +1,103 @@
+From dd46151c228ab69c661e782573cf06a06b56dfae Mon Sep 17 00:00:00 2001
+From: Andy Balholm <andy@balholm.com>
+Date: Sat, 23 Feb 2019 16:51:08 -0800
+Subject: [PATCH 1/2] Preliminary external-classifier support.
+
+---
+ acl.go    |  2 +-
+ config.go |  3 +++
+ proxy.go  | 30 ++++++++++++++++++++++++++++++
+ 3 files changed, 34 insertions(+), 1 deletion(-)
+
+diff --git a/acl.go b/acl.go
+index 5ef95c3..2e60202 100644
+--- a/acl.go
++++ b/acl.go
+@@ -503,7 +503,7 @@ func (c *config) ChooseACLCategoryAction(acls map[string]bool, scores map[string
+ 	acls = copyACLSet(acls)
+ 	significantScores := make(map[string]int)
+ 	for k, v := range scores {
+-		if v > 0 && c.Categories[k].action == ACL {
++		if v > 0 && c.Categories[k] != nil && c.Categories[k].action == ACL {
+ 			acls[k] = true
+ 			continue
+ 		}
+diff --git a/config.go b/config.go
+index 7df9e01..ebda825 100644
+--- a/config.go
++++ b/config.go
+@@ -105,6 +105,8 @@ type config struct {
+ 	HTTP2Downstream           bool
+ 	DisableKeepAlivesUpstream bool
+ 
++	ExternalClassifiers []string
++
+ 	flags *flag.FlagSet
+ }
+ 
+@@ -173,6 +175,7 @@ func loadConfiguration() (*config, error) {
+ 
+ 	c.stringListFlag("classifier-ignore", "category to omit from classifier results", &c.ClassifierIgnoredCategories)
+ 	c.stringListFlag("public-suffix", "domain to treat as a public suffix", &c.PublicSuffixes)
++	c.stringListFlag("external-classifier", "HTTP API endpoint to check URLs against", &c.ExternalClassifiers)
+ 
+ 	c.newActiveFlag("virtual-host", "", "a hostname substitution to apply to HTTP requests (e.g. -virtual-host me.local localhost)", func(val string) error {
+ 		f := strings.Fields(val)
+diff --git a/proxy.go b/proxy.go
+index 2a7a304..c5ceddf 100644
+--- a/proxy.go
++++ b/proxy.go
+@@ -5,6 +5,7 @@ import (
+ 	"compress/flate"
+ 	"context"
+ 	"crypto/tls"
++	"encoding/json"
+ 	"errors"
+ 	"fmt"
+ 	"image"
+@@ -17,6 +18,7 @@ import (
+ 	"mime"
+ 	"net"
+ 	"net/http"
++	"net/url"
+ 	"strconv"
+ 	"strings"
+ 	"time"
+@@ -188,6 +190,34 @@ func (h proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+ 
+ 	tally := conf.URLRules.MatchingRules(r.URL)
+ 	scores := conf.categoryScores(tally)
++
++	for _, classifier := range conf.ExternalClassifiers {
++		cu := classifier + "?url=" + url.QueryEscape(r.URL.String())
++		cr, err := http.Get(cu)
++		if err != nil {
++			log.Printf("Error checking external-classifier (%s): %v", cu, err)
++			continue
++		}
++		if cr.StatusCode != 200 {
++			log.Printf("Bad HTTP status checking external-classifier (%s): %s", cu, cr.Status)
++			continue
++		}
++		jd := json.NewDecoder(cr.Body)
++		externalScores := make(map[string]int)
++		err = jd.Decode(&externalScores)
++		cr.Body.Close()
++		if err != nil {
++			log.Printf("Error decoding response from external-classifier (%s): %v", cu, err)
++			continue
++		}
++		if scores == nil {
++			scores = make(map[string]int)
++		}
++		for k, v := range externalScores {
++			scores[k] += v
++		}
++	}
++
+ 	reqScores := scores
+ 
+ 	reqACLs := conf.ACLs.requestACLs(r, authUser)
+-- 
+2.17.1
+

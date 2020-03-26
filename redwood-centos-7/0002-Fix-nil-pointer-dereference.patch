@@ -1,0 +1,51 @@
+From e1c0dc065ce4b6413d1f930d05cc154f39f670a7 Mon Sep 17 00:00:00 2001
+From: Andy Balholm <andy@balholm.com>
+Date: Mon, 25 Feb 2019 09:41:28 -0800
+Subject: [PATCH 2/2] Fix nil pointer dereference.
+
+If an external classifier returned a category that wasn't in the config
+files, trying to find its defaul action would dereference a nil pointer.
+---
+ acl.go | 26 ++++++++++++++------------
+ 1 file changed, 14 insertions(+), 12 deletions(-)
+
+diff --git a/acl.go b/acl.go
+index 2e60202..2481cfd 100644
+--- a/acl.go
++++ b/acl.go
+@@ -553,18 +553,20 @@ func (c *config) ChooseACLCategoryAction(acls map[string]bool, scores map[string
+ 			r = ACLActionRule{
+ 				Needed: []string{cat},
+ 			}
+-			switch cg.action {
+-			case BLOCK:
+-				if cg.invisible && choices["block-invisible"] {
+-					r.Action = "block-invisible"
+-				} else if choices["block"] {
+-					r.Action = "block"
+-				}
+-			case IGNORE:
+-				r.Action = "ignore-category"
+-			case ALLOW:
+-				if choices["allow"] {
+-					r.Action = "allow"
++			if cg != nil {
++				switch cg.action {
++				case BLOCK:
++					if cg.invisible && choices["block-invisible"] {
++						r.Action = "block-invisible"
++					} else if choices["block"] {
++						r.Action = "block"
++					}
++				case IGNORE:
++					r.Action = "ignore-category"
++				case ALLOW:
++					if choices["allow"] {
++						r.Action = "allow"
++					}
+ 				}
+ 			}
+ 		}
+-- 
+2.17.1
+
