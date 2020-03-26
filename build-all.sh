@@ -8,6 +8,8 @@ VERSION_NUMBER="1.1.41"
 
 BUILD_ARRAY=`ls -d redwood-*/`
 
+NOCACHE=$(cat no-cache)
+
 if [[ ! -z "${BUILD_ONLY}" ]];then
 	BUILD_ARRAY=`ls -d */|egrep "${BUILD_ONLY}"`
 fi
@@ -19,8 +21,8 @@ do
 	cd "$Build"
 	DOCKER_IMAGE=`cat dockerimage`
 	echo "${DOCKER_IMAGE}"
-	stat dockerimage && \
-		( docker image inspect  "${DOCKER_IMAGE}" && docker build . -t "${DOCKER_IMAGE}" )
+	stat build && stat dockerimage && \
+		 docker build  . -t "${DOCKER_IMAGE}" ${NOCACHE} && \
 	stat build && docker run -it \
 	        -e COMPRESSION="${COMPRESSION}" \
 	        -e DEBUG_MODE="${DEBUG_MODE}" \
