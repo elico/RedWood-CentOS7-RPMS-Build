@@ -1,6 +1,6 @@
 Name:     redwood
-Version:  1.1.41
-Release:  1%{?dist}
+Version:  1.1.44
+Release:  2%{?dist}
 Summary:  The RedWood Content-Filtering proxy
 Epoch:    7
 Packager: Eliezer Croitoru <ngtech1ltd@gmail.com>
@@ -94,6 +94,10 @@ rm -rf $RPM_BUILD_ROOT
 %systemd_postun_with_restart redwood.service
 
 %changelog
+* Thu Apr 23 2020 Eliezer Croitoru <ngtech1ltd@gmail.com>
+- Release 1.1.44 Stable.
++ This version is a testing version of couple new features.
+
 * Thu Mar 26 2020 Eliezer Croitoru <ngtech1ltd@gmail.com>
 - Release 1.1.41 Stable.
 + This version is a testing version.

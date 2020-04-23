@@ -2,16 +2,14 @@ FROM golang:alpine AS build-env
 LABEL maintainer "Eliezer Croitoru <ngtech1ltd@gmail.com>"
 
 # Install OS-level dependencies.
-RUN apk add --no-cache curl git vim bash wget patch
+RUN apk add --no-cache curl git vim bash wget patch tar
 
-ADD 0001-Preliminary-external-classifier-support.patch /root/
-ADD 0002-Fix-nil-pointer-dereference.patch /root/
-# Copy our source code into the container.
-RUN git clone --single-branch --depth 1 https://github.com/andybalholm/redwood /root/redwood && \
+COPY 0004-External-Classifier-and-Connect-ACL.patch /root/
+
+RUN git clone --single-branch --depth 1 https://github.com/elico/redwood /root/redwood && \
         cd /root/redwood && \
-	patch -p1 < /root/0001-Preliminary-external-classifier-support.patch && \
-	patch -p1 < /root/0002-Fix-nil-pointer-dereference.patch && \
         CGO_ENABLED=0 go build 
+
 
 FROM centos:7
 LABEL maintainer "Eliezer Croitoru <ngtech1ltd@gmail.com>"

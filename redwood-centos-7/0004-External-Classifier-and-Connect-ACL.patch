@@ -1,0 +1,257 @@
+diff --git a/acl.go b/acl.go
+index d621adc..aa08714 100644
+--- a/acl.go
++++ b/acl.go
+@@ -571,7 +571,7 @@ func (c *config) ChooseACLCategoryAction(acls map[string]bool, scores map[string
+ 	acls = copyACLSet(acls)
+ 	significantScores := make(map[string]int)
+ 	for k, v := range scores {
+-		if v > 0 && c.Categories[k].action == ACL {
++		if v > 0 && c.Categories[k] != nil && c.Categories[k].action == ACL {
+ 			acls[k] = true
+ 			continue
+ 		}
+@@ -640,18 +640,20 @@ func (c *config) ChooseACLCategoryAction(acls map[string]bool, scores map[string
+ 			r = ACLActionRule{
+ 				Needed: []string{cat},
+ 			}
+-			switch cg.action {
+-			case BLOCK:
+-				if cg.invisible && choices["block-invisible"] {
+-					r.Action = "block-invisible"
+-				} else if choices["block"] {
+-					r.Action = "block"
+-				}
+-			case IGNORE:
+-				r.Action = "ignore-category"
+-			case ALLOW:
+-				if choices["allow"] {
+-					r.Action = "allow"
++			if cg != nil {
++				switch cg.action {
++				case BLOCK:
++					if cg.invisible && choices["block-invisible"] {
++						r.Action = "block-invisible"
++					} else if choices["block"] {
++						r.Action = "block"
++					}
++				case IGNORE:
++					r.Action = "ignore-category"
++				case ALLOW:
++					if choices["allow"] {
++						r.Action = "allow"
++					}
+ 				}
+ 			}
+ 		}
+diff --git a/config.go b/config.go
+index 22e06a6..781f100 100644
+--- a/config.go
++++ b/config.go
+@@ -85,6 +85,7 @@ type config struct {
+ 	TLSCert          tls.Certificate
+ 	ParsedTLSCert    *x509.Certificate
+ 	TLSReady         bool
++	BumpBlockedTLS	 bool
+ 	ExtraRootCerts   *x509.CertPool
+ 	BlockObsoleteSSL bool
+ 	CertCache        CertificateCache
+@@ -108,6 +109,10 @@ type config struct {
+ 	HTTP2Downstream           bool
+ 	DisableKeepAlivesUpstream bool
+ 
++	ExternalClassifiers []string
++	ExternalConnectACL []string
++
++
+ 	GZIPLevel   int
+ 	BrotliLevel int
+ 
+@@ -185,6 +190,10 @@ func loadConfiguration() (*config, error) {
+ 
+ 	c.stringListFlag("classifier-ignore", "category to omit from classifier results", &c.ClassifierIgnoredCategories)
+ 	c.stringListFlag("public-suffix", "domain to treat as a public suffix", &c.PublicSuffixes)
++	c.stringListFlag("external-classifier", "HTTP API endpoint to check URLs against", &c.ExternalClassifiers)
++	c.stringListFlag("external-connect-acl", "HTTP API endpoint to check CONNECT Request against", &c.ExternalConnectACL)
++	c.flags.BoolVar(&c.BumpBlockedTLS, "bump-blocked", true, "Bump TLS connections on block action.")
++
+ 
+ 	c.newActiveFlag("virtual-host", "", "a hostname substitution to apply to HTTP requests (e.g. -virtual-host me.local localhost)", func(val string) error {
+ 		f := strings.Fields(val)
+diff --git a/proxy.go b/proxy.go
+index 80f83bb..327b49d 100644
+--- a/proxy.go
++++ b/proxy.go
+@@ -4,6 +4,7 @@ import (
+ 	"bytes"
+ 	"compress/flate"
+ 	"context"
++	"encoding/json"
+ 	"errors"
+ 	"fmt"
+ 	"image"
+@@ -15,6 +16,7 @@ import (
+ 	"log"
+ 	"net"
+ 	"net/http"
++	"net/url"
+ 	"strconv"
+ 	"strings"
+ 	"time"
+@@ -175,7 +177,6 @@ func (h proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+ 			return
+ 		}
+ 		fmt.Fprint(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
+-
+ 		server := &http.Server{
+ 			Handler: proxyHandler{
+ 				TLS:         false,
+@@ -196,6 +197,38 @@ func (h proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+ 
+ 	tally := conf.URLRules.MatchingRules(r.URL)
+ 	scores := conf.categoryScores(tally)
++
++
++	for _, classifier := range conf.ExternalClassifiers {
++		v := make(url.Values)
++		v.Set("url", r.URL.String())
++		v.Set("method", r.Method)
++
++		cr, err := clientWithExtraRootCerts.PostForm(classifier, v)
++		if err != nil {
++			log.Printf("Error checking external-classifier (%s): %v", classifier, err)
++			continue
++		}
++		if cr.StatusCode != 200 {
++			log.Printf("Bad HTTP status checking external-classifier (%s): %s", classifier, cr.Status)
++			continue
++		}
++		jd := json.NewDecoder(cr.Body)
++		externalScores := make(map[string]int)
++		err = jd.Decode(&externalScores)
++		cr.Body.Close()
++		if err != nil {
++			log.Printf("Error decoding response from external-classifier (%s): %v", classifier, err)
++			continue
++		}
++		if scores == nil {
++			scores = make(map[string]int)
++		}
++		for k, v := range externalScores {
++			scores[k] += v
++		}
++	}
++
+ 	reqScores := scores
+ 
+ 	reqACLs := conf.ACLs.requestACLs(r, authUser)
+@@ -213,12 +246,20 @@ func (h proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+ 	}
+ 
+ 	thisRule, ignored := conf.ChooseACLCategoryAction(reqACLs, scores, conf.Threshold, possibleActions...)
++
+ 	if r.Method == "CONNECT" && conf.TLSReady && thisRule.Action == "" {
+ 		// If the result is unclear, go ahead and start to bump the connection.
+ 		// The ACLs will be checked one more time anyway.
+ 		thisRule.Action = "ssl-bump"
+ 	}
+ 
++
++	if r.Method == "CONNECT" && conf.TLSReady && thisRule.Action == "block" && conf.BumpBlockedTLS{
++		// If the connection has been blocked then bump if the bump-blocked is enabled.
++		thisRule.Action = "ssl-bump"
++	}
++
++
+ 	switch thisRule.Action {
+ 	case "require-auth":
+ 		conf.send407(w)
+diff --git a/tls.go b/tls.go
+index 34090f5..91eaeb8 100644
+--- a/tls.go
++++ b/tls.go
+@@ -22,6 +22,7 @@ import (
+ 	"strings"
+ 	"sync"
+ 	"time"
++	"encoding/json"
+ 
+ 	"github.com/open-ch/ja3"
+ 	"golang.org/x/net/http2"
+@@ -186,6 +187,7 @@ func SSLBump(conn net.Conn, serverAddr, user, authUser string, r *http.Request)
+ 
+ 	tally := conf.URLRules.MatchingRules(cr.URL)
+ 	scores := conf.categoryScores(tally)
++
+ 	reqACLs := conf.ACLs.requestACLs(cr, authUser)
+ 	if invalidSSL {
+ 		reqACLs["invalid-ssl"] = true
+@@ -200,8 +202,49 @@ func SSLBump(conn net.Conn, serverAddr, user, authUser string, r *http.Request)
+ 	}
+ 
+ 	rule, ignored := conf.ChooseACLCategoryAction(reqACLs, scores, conf.Threshold, possibleActions...)
++
++	for _, externalACL := range conf.ExternalConnectACL {
++			v := make(url.Values)
++			v.Set("url", cr.URL.String())
++			v.Set("method", cr.Method)
++			v.Set("action", rule.Action)
++
++			localCr, err := clientWithExtraRootCerts.PostForm(externalACL, v)
++			if err != nil {
++				log.Printf("Error checking external-connect-acl (%s): %v", externalACL, err)
++				continue
++			}
++			if localCr.StatusCode != 200 {
++				log.Printf("Bad HTTP status checking external-connect-acl (%s): %s", externalACL, localCr.Status)
++				continue
++			}
++			jd := json.NewDecoder(localCr.Body)
++			externalAclsAction := make(map[string]int)
++			err = jd.Decode(&externalAclsAction)
++			localCr.Body.Close()
++			if err != nil {
++				log.Printf("Error decoding response from external-connect-acl (%s): %v", externalACL, err)
++				continue
++			}
++			for k := range externalAclsAction {
++				if k == "ssl-bump" || k == "tlsbump" {
++					if conf.TLSReady && !obsoleteVersion && !invalidSSL {
++						rule.Action = "ssl-bump"
++					}
++				}
++				if k == "allow" || k == "bumpbypass"{
++					rule.Action = "allow"
++				}
++				if k == "block" {
++					rule.Action = k
++				}
++			}
++	}
++
++
+ 	logAccess(cr, nil, 0, false, user, tally, scores, rule, "", ignored)
+ 
++
+ 	switch rule.Action {
+ 	case "allow", "":
+ 		conf = nil
+diff --git a/transport.go b/transport.go
+index faf07fe..b8ce64f 100644
+--- a/transport.go
++++ b/transport.go
+@@ -89,7 +89,13 @@ func dialWithExtraRootCerts(network, addr string) (net.Conn, error) {
+ }
+ 
+ var transportWithExtraRootCerts = &http.Transport{
+-	DialTLS: dialWithExtraRootCerts,
++	DialTLS:               dialWithExtraRootCerts,
++	TLSHandshakeTimeout:   10 * time.Second,
++	ExpectContinueTimeout: 1 * time.Second,
++}
++
++var clientWithExtraRootCerts = &http.Client{
++	Transport: transportWithExtraRootCerts,
+ }
+ 
+ // A hardValidationTransport wraps another (insecure) RoundTripper and checks
